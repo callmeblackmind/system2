@@ -1,0 +1,18 @@
+{
+  "name": "ai-chat-bot",
+  "version": "2.0.0",
+  "description": "سایت چت و ربات تلگرام با هوش مصنوعی (CodeCraft API)",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

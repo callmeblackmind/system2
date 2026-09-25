@@ -213,13 +213,17 @@ async function askAI(history) {
       signal: controller.signal
     });
 
-    const data = await response.json().catch(() => ({}));
-
     if (!response.ok) {
-      console.error("CodeCraft API error:", response.status, JSON.stringify(data));
+      // بدنه ممکن است JSON نباشد (مثلاً صفحه‌ی خطای Cloudflare)؛ متن خام را لاگ کن تا علت واقعی معلوم شود
+      const raw = await response.text().catch(() => "");
+      console.error(
+        `CodeCraft API error: ${response.status} | content-type: ${response.headers.get("content-type")} | cf-ray: ${response.headers.get("cf-ray") || "-"}\n` +
+        raw.slice(0, 800)
+      );
       throw new AIError(`CodeCraft API returned ${response.status}`, response.status);
     }
 
+    const data = await response.json().catch(() => ({}));
     return extractAnswer(data) || "پاسخی دریافت نشد.";
   } catch (error) {
     if (error instanceof AIError) throw error;

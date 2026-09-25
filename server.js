@@ -183,6 +183,32 @@ function extractAnswer(data) {
   return "";
 }
 
+// کلید را برای لاگ پنهان کن: فقط ۴ کاراکتر اول و آخر نشان داده می‌شود
+function maskKey(key) {
+  if (!key) return "(خالی)";
+  if (key.length <= 10) return `${key.slice(0, 2)}***`;
+  return `${key.slice(0, 6)}...${key.slice(-4)} (طول: ${key.length})`;
+}
+
+// از روی کد وضعیت و متن خطا، محتمل‌ترین علت را حدس بزن (فقط برای راهنمایی در لاگ)
+function guessCause(status, contentType, raw) {
+  const text = (raw || "").toLowerCase();
+  const isHtml = (contentType || "").includes("text/html") || /<html|<!doctype/.test(text);
+
+  if (status === 401) return "توکن نامعتبر یا اشتباه است (Unauthorized).";
+  if (status === 403 && isHtml) {
+    if (text.includes("cloudflare") || text.includes("cf-") || text.includes("ray id")) {
+      return "درخواست قبل از رسیدن به سرور CodeCraft توسط Cloudflare مسدود شده — معمولاً یعنی IP سرور (اینجا Render) مسدود یا مشکوک تشخیص داده شده. با توکن CodeCraft و همان محتوا از سیستم خودت (IP دیگر) این خطا معمولاً دیده نمی‌شود.";
+    }
+    return "پاسخ ۴۰۳ به‌صورت HTML آمده (نه JSON) — یعنی این جواب اصلاً از خود API نیامده، بلکه یک لایه‌ی امنیتی/پروکسی جلوی آن (مثل WAF یا فایروال) درخواست را رد کرده. علت معمولاً مسدودیت بر اساس IP، کشور، یا User-Agent است.";
+  }
+  if (status === 403) return "دسترسی رد شد (Forbidden) — توکن معتبر است ولی اجازه‌ی این عملیات/مدل را ندارد، یا اعتبار/پلن حساب کافی نیست.";
+  if (status === 404) return "آدرس یا نام مدل پیدا نشد — CODECRAFT_BASE_URL یا CODECRAFT_MODEL را بررسی کن.";
+  if (status === 429) return "تعداد درخواست‌ها از سقف مجاز رد شده (Rate limit).";
+  if (status >= 500) return "خطای داخلی سرور CodeCraft — معمولاً موقتی است، کمی بعد دوباره امتحان کن.";
+  return "علت مشخص نیست؛ متن کامل پاسخ زیر همین لاگ را بررسی کن.";
+}
+
 // history: آرایه‌ای از { role: "user" | "assistant", content }
 // این API حافظه ندارد، پس کل مکالمه در هر درخواست فرستاده می‌شود.
 async function askAI(history) {
@@ -196,9 +222,11 @@ async function askAI(history) {
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  const startedAt = Date.now();
+  const requestUrl = `${CODECRAFT_BASE_URL}/chat/completions`;
 
   try {
-    const response = await fetch(`${CODECRAFT_BASE_URL}/chat/completions`, {
+    const response = await fetch(requestUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -213,12 +241,26 @@ async function askAI(history) {
       signal: controller.signal
     });
 
+    const elapsedMs = Date.now() - startedAt;
+
     if (!response.ok) {
       // بدنه ممکن است JSON نباشد (مثلاً صفحه‌ی خطای Cloudflare)؛ متن خام را لاگ کن تا علت واقعی معلوم شود
       const raw = await response.text().catch(() => "");
+      const contentType = response.headers.get("content-type");
+      const headerDump = ["cf-ray", "server", "via", "x-request-id"]
+        .map(h => `${h}=${response.headers.get(h) || "-"}`)
+        .join(" | ");
+
       console.error(
-        `CodeCraft API error: ${response.status} | content-type: ${response.headers.get("content-type")} | cf-ray: ${response.headers.get("cf-ray") || "-"}\n` +
-        raw.slice(0, 800)
+        "===== CodeCraft API error =====\n" +
+        `درخواست: POST ${requestUrl}\n` +
+        `مدل: ${AI_MODEL} | تعداد پیام‌ها: ${messages.length} | زمان پاسخ: ${elapsedMs}ms\n` +
+        `کلید استفاده‌شده: ${maskKey(CODECRAFT_API_KEY)}\n` +
+        `وضعیت: ${response.status} ${response.statusText} | content-type: ${contentType}\n` +
+        `هدرها: ${headerDump}\n` +
+        `حدس علت: ${guessCause(response.status, contentType, raw)}\n` +
+        `--- متن خام پاسخ (حداکثر ۸۰۰ کاراکتر) ---\n${raw.slice(0, 800)}\n` +
+        "================================"
       );
       throw new AIError(`CodeCraft API returned ${response.status}`, response.status);
     }
@@ -228,9 +270,16 @@ async function askAI(history) {
   } catch (error) {
     if (error instanceof AIError) throw error;
     if (error.name === "AbortError") {
+      console.error(`CodeCraft request timed out after ${Date.now() - startedAt}ms | url: ${requestUrl}`);
       throw new AIError("CodeCraft API timed out", 504);
     }
-    console.error("CodeCraft request failed:", error);
+    console.error(
+      "===== CodeCraft network error =====\n" +
+      `درخواست: POST ${requestUrl}\n` +
+      `نوع خطا: ${error.code || error.cause?.code || error.name} | پیام: ${error.message}\n` +
+      "این یعنی اصلاً پاسخی از سرور نگرفتیم (نه ۴۰۳، نه چیز دیگر) — معمولاً یعنی سرور Render اصلاً نتوانسته به codecraftapi.com وصل شود (مشکل DNS، شبکه، یا مسدودیت خروجی).\n" +
+      "================================"
+    );
     throw new AIError(`Network error: ${error.message}`, 502);
   } finally {
     clearTimeout(timer);
